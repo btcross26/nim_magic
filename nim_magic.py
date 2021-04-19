@@ -1,42 +1,36 @@
 """
-nim_magic.py
-Nim cell magic for JupyterLab or Juypter Python Notebooks.
+The code in this file has been largely borrowed and modified from the following
+GitHub location: https://github.com/apahl/nim_magic. The resulting code in this file
+is relicensed under the MIT license, Copyright (c) 2021 Benjamin Cross.
 
-Write Nim modules and use the compiled code directly in the Notebook as extension modules for the Python kernel (similar to e.g. %%cython, but for your favorite language :-P ). It builds on @yglukhov 's awesome [nimpy](https://github.com/yglukhov/nimpy) library.
+The original code is borrowed and copied under the following MIT license:
 
-## Requirements
-* A [Nim](https://nim-lang.org) compiler in your path
-* [nimpy](https://github.com/yglukhov/nimpy) package (`nimble install nimpy`)
+Copyright (c) 2018 Axel Pahl
 
-## Installation
-Just put the file `nim_magic.py` somewhere in Python's import path.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Example
-In a JupyterLab or Jupyter Notebook:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-```Python
-# In [1]:
-%load_ext nim_magic
-
-
-# In [2]:
-%%nim -d:release
-proc greet(name: string): string {.exportpy.} =
-    return "Hello, " & name & "!"
-
-
-# In [3]:
-greet("World")
-
-
-# Out [3]:
-'Hello, World!'
-
-
-# In [4] (this will remove temporary dirs created by nim_magic):
-%nim_clear
-```
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 """
+
+
+# original author: Axel Pahl
+# modificiations by: Benjamin Cross
+# modified: 2021-04-19
+
 
 import os
 import shutil
@@ -49,37 +43,90 @@ from IPython.core.magic import (Magics, magics_class,
 
 @magics_class
 class NimMagics(Magics):
+    def __init__(self, shell):
+        super(NimMagics, self).__init__(shell)
+        self._dir = "_nimmagic"
+
+    def _get_name(self):
+        name = time.strftime("nim%y%m%d%H%M%S")
+        return name
+
+    def _nim_compile(self, code, cmd, name, pstdout=False):
+        if not os.path.isdir(self._dir):
+            os.mkdir(self._dir)
+
+        with open(f"{self._dir}/{name}.nim", "wt") as f:
+            f.write(code)
+        cp = sp.run(
+            cmd,
+            shell=True,
+            check=False,
+            encoding="utf8",
+            stdout=sp.PIPE,
+            stderr=sp.PIPE,
+        )
+        if cp.stderr.strip():
+            print(cp.stderr.strip())
+        if pstdout and cp.stdout.strip():
+            print(cp.stdout.strip())
+        return cp.returncode
 
     @line_magic
     def nim_clear(self, cmd):
-        """%nim_clear
-        will remove the temporary dirs used by nim_magic."""
-        shutil.rmtree('nimmagic', ignore_errors=True)
+        """
+        %nim_clear
+        will remove the temporary dirs used by nim_magic.
+        """
+        shutil.rmtree(self._dir, ignore_errors=True)
         print("Removed temporary files used by nim_magic.")
 
     @cell_magic
-    def nim(self, options, code):
-        """`options` can be left empty or contain further compile options, e.g. "-d:release"
+    def nimpy(self, options, code):
+        """
+        `options` can be left empty or contain further compile options, e.g. "-d:release"
         (separated by space).
 
         Example:
 
-        %%nim -d:release
-        <code to compile in release mode>"""
-        if not os.path.isdir("nimmagic"):
-            os.mkdir("nimmagic")
-
-        glbls = self.shell.user_ns
-        name = time.strftime("nim%y%m%d%H%M%S")
+        %%nimpy -d:release
+        <code to compile in release mode>
+        """
+        # add nimpy import to code
         code = "import nimpy\n\n" + code
-        ext = "pyd" if sys.platform.startswith('win') else "so"
-        open("nimmagic/{}.nim".format(name), "w").write(code)
-        cmd = "nim {1} --hints:off --app:lib --out:nimmagic/{0}.{2} c nimmagic/{0}.nim".format(name, options, ext)
-        cp = sp.run(cmd, shell=True, check=False, encoding="utf8", stdout=sp.PIPE, stderr=sp.PIPE)
-        print(cp.stderr)
-        if cp.returncode == 0:
-            import_exec = "from nimmagic.{} import *".format(name)
+
+        # create compile command for dynamic library
+        name = self._get_name()
+        platform = sys.platform
+        if platform.startswith("win"):
+            ext = "pyd"
+        elif platform in ["darwin", "linux"]:
+            ext = "so"
+        else:
+            raise RuntimeError("unrecognized system platform")
+        dir = self._dir
+        options += f" --hints:off --app:lib --out:{dir}/{name}.{ext}"
+        cmd = f"nim c {options} {dir}/{name}.nim"
+        returncode = self._nim_compile(code, cmd, name)
+        if returncode == 0:
+            glbls = self.shell.user_ns
+            import_exec = f"from {self._dir}.{name} import *"
             exec(import_exec, glbls)
+
+    @cell_magic
+    def inim(self, options, code):
+        """
+        `options` can be left empty or contain further arguments to pass to the
+        compiled binary
+
+        Example:
+
+        %%inim -d:release
+        <code to compile and get output in interctive mode>
+        """
+        name = self._get_name()
+        options += f" --run --hints:off --out:{self._dir}/{name}"
+        cmd = f"nim c {options} {self._dir}/{name}.nim"
+        _ = self._nim_compile(code, cmd, name, True)
 
 
 def load_ipython_extension(ipython):
